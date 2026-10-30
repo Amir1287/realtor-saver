@@ -9,13 +9,47 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
-        with: { distribution: temurin, java-version: '17' }
+        with:
+          distribution: temurin
+          java-version: '17'
       - uses: subosito/flutter-action@v2
-        with: { channel: stable }
+        with:
+          channel: stable
       - run: flutter create --platforms=android --project-name realtor_saver .
-      - run: |
+      - name: Add permissions
+        run: |
           F=android/app/src/main/AndroidManifest.xml
           sed -i 's#<application#<uses-permission android:name="android.permission.INTERNET"/>\n    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"/>\n    <application#' $F
+      - name: Force compileSdk 36 for all plugins
+        run: |
+          python3 - <<'PY'
+          import os
+          kts = """subprojects {
+              afterEvaluate {
+                  project.extensions.findByName("android")?.withGroovyBuilder {
+                      "compileSdkVersion"(36)
+                  }
+              }
+          }
+
+          """
+          grv = """subprojects {
+              afterEvaluate { p ->
+                  if (p.hasProperty('android')) {
+                      p.android { compileSdkVersion 36 }
+                  }
+              }
+          }
+
+          """
+          if os.path.exists('android/build.gradle.kts'):
+              f, add = 'android/build.gradle.kts', kts
+          else:
+              f, add = 'android/build.gradle', grv
+          s = open(f).read()
+          open(f, 'w').write(add + s)
+          print('patched', f)
+          PY
       - run: flutter pub get
       - run: flutter build apk --release
       - uses: actions/upload-artifact@v4
