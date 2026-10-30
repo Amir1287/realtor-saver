@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:excel/excel.dart';
@@ -26,58 +27,22 @@ const _ua = 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML,
 // Extracts: name, biography, profile photo from the realtor page.
 const _js = r'''
 (function(){
-  function meta(p){var e=document.querySelector('meta[property="'+p+'"],meta[name="'+p+'"]');return e?(e.content||''):'';}
-  function txt(e){return (e.innerText||e.textContent||'').trim();}
-  var ld={};
-  [].slice.call(document.querySelectorAll('script[type="application/ld+json"]')).forEach(function(s){
-    try{
-      var j=JSON.parse(s.textContent);
-      var arr=Array.isArray(j)?j:(j['@graph']||[j]);
-      arr.forEach(function(o){
-        var t=JSON.stringify(o['@type']||'');
-        if(/Person|RealEstateAgent|Agent/i.test(t)&&!ld.name){ld=o;}
-      });
-    }catch(e){}
-  });
-  var h1=document.querySelector('h1');
-  var name=(ld.name||'')||(h1?txt(h1):'')||meta('og:title');
-  name=name.replace(/\s*[\|\-–].*REALTOR.*$/i,'').trim();
-
-  // biography: longest text block among bio/about/description-like elements
-  var bio='';
-  var sel='[class*="bio" i],[id*="bio" i],[class*="about" i],[id*="about" i],[class*="description" i],[id*="description" i],[class*="profile" i]';
-  [].slice.call(document.querySelectorAll(sel)).forEach(function(e){
-    var t=txt(e);
-    if(t.length>60&&t.length<6000&&t.length>bio.length&&t!==name){bio=t;}
-  });
-  if(!bio)bio=(ld.description||'')||meta('og:description')||meta('description');
-
-  // profile photo
-  var tokens=name.toLowerCase().split(/\s+/).filter(function(x){return x.length>2});
-  var best='',bestScore=0;
-  [].slice.call(document.images).forEach(function(i){
-    var src=i.currentSrc||i.src||'';
-    if(src.indexOf('http')!=0)return;
-    if(/logo|icon|sprite|banner|placeholder|\.svg/i.test(src))return;
-    var alt=(i.alt||'').toLowerCase();
-    var cls=((i.className||'')+' '+(i.id||'')+' '+src).toLowerCase();
-    var sc=0;
-    tokens.forEach(function(t){if(alt.indexOf(t)>=0)sc+=5;});
-    if(/agent|profile|headshot|photo|individual|avatar|portrait/.test(cls))sc+=3;
-    var w=i.naturalWidth||i.width||0;
-    if(w>=100)sc+=1;
-    if(sc>bestScore){bestScore=sc;best=src;}
-  });
-  var photo=best||(typeof ld.image==='string'?ld.image:(ld.image&&ld.image.url)||'')||meta('og:image');
-
-  var extra=[];
-  [].slice.call(document.querySelectorAll('a[href^="tel:"]')).forEach(function(a){
-    var v=a.getAttribute('href').replace('tel:','');if(extra.indexOf('Phone: '+v)<0)extra.push('Phone: '+v);});
-  [].slice.call(document.querySelectorAll('a[href^="mailto:"]')).forEach(function(a){
-    var v=a.getAttribute('href').replace('mailto:','').split('?')[0];if(extra.indexOf('Email: '+v)<0)extra.push('Email: '+v);});
-  return JSON.stringify({name:name,bio:bio,photo:photo,extra:extra});
+  function q(sel,root){return (root||document).querySelector(sel);}
+  function t(sel,root){var e=q(sel,root);return e?(e.innerText||e.textContent||'').replace(/\s+/g,' ').trim():'';}
+  var card=q('#realtorDetailsCard')||document;
+  var name=t('.realtorCardName h1',card)||t('h1');
+  var edu=t('.realtorCardEducation',card);
+  var pos=t('.realtorCardTitle',card);
+  var addr=t('.realtorCardAddress',card);
+  var imgEl=q('img.realtorCardImage',card);
+  var photo=imgEl?(imgEl.currentSrc||imgEl.src):'';
+  var lines=[];
+  if(pos)lines.push(pos);
+  if(addr)lines.push(addr);
+  return JSON.stringify({name:name,bio:lines.join('\n').trim(),photo:photo,extra:[]});
 })()
 ''';
+
 
 class Home extends StatefulWidget {
   const Home({super.key});
@@ -92,13 +57,17 @@ class _HomeState extends State<Home> {
   bool busy = false;
   String status = '';
   String? savePath;
+  Completer<String>? _imgWait;
 
   @override
   void initState() {
     super.initState();
     wc = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setUserAgent(_ua);
+      ..setUserAgent(_ua)
+      ..addJavaScriptChannel('ImgChannel', onMessageReceived: (m) {
+        if (!(_imgWait?.isCompleted ?? true)) _imgWait!.complete(m.message);
+      });
     _loadHistory();
     _loadSettings();
   }
@@ -161,14 +130,21 @@ class _HomeState extends State<Home> {
     final dir = Directory('$basePath/${_safe(e['name'])}');
     await dir.create(recursive: true);
     final info = StringBuffer()
-      ..write('Name\r\n${e['name']}\r\n\r\nInformation\r\n${(e['info'] ?? '').toString().replaceAll('\n', '\r\n')}');
+      ..write('${e['name']}\r\n${(e['info'] ?? '').toString().replaceAll('\n', '\r\n')}');
     // UTF-8 with BOM so Windows Notepad shows all characters correctly
     await File('${dir.path}/text.txt')
         .writeAsBytes([0xEF, 0xBB, 0xBF, ...utf8.encode(info.toString())]);
     final img = (e['photo'] ?? '').toString();
     if (img.isEmpty) return false;
+    final uri = Uri.parse((e['url'] ?? 'https://www.realtor.ca').toString()).resolve(img);
+    final ext = (RegExp(r'\.(png|webp|jpe?g)(\?|$)', caseSensitive: false)
+                .firstMatch(uri.toString())
+                ?.group(1) ??
+            'jpg')
+        .toLowerCase();
+    final out = File('${dir.path}/photo.$ext');
+    // Attempt 1: direct HTTP download
     try {
-      final uri = Uri.parse((e['url'] ?? 'https://www.realtor.ca').toString()).resolve(img);
       final c = HttpClient();
       final req = await c.getUrl(uri);
       req.headers.set('User-Agent', _ua);
@@ -179,13 +155,50 @@ class _HomeState extends State<Home> {
       final bytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
       c.close();
       if (bytes.length < 500) throw Exception('small');
-      final m = RegExp(r'\.(png|webp|jpe?g)(\?|$)', caseSensitive: false).firstMatch(uri.toString());
-      final ext = (m?.group(1) ?? 'jpg').toLowerCase();
-      await File('${dir.path}/photo.$ext').writeAsBytes(bytes);
+      await out.writeAsBytes(bytes);
       return true;
-    } catch (_) {
-      return false;
-    }
+    } catch (_) {}
+    // Attempt 2: download inside the WebView (same browser session)
+    try {
+      _imgWait = Completer<String>();
+      await wc.runJavaScript("""
+        fetch('${uri.toString()}').then(function(r){return r.blob();}).then(function(b){
+          var fr=new FileReader();
+          fr.onload=function(){ImgChannel.postMessage(fr.result);};
+          fr.readAsDataURL(b);
+        }).catch(function(e){ImgChannel.postMessage('ERR:'+e);});
+      """);
+      final data = await _imgWait!.future.timeout(const Duration(seconds: 25));
+      if (data.startsWith('data:')) {
+        final bytes = base64Decode(data.split(',').last);
+        if (bytes.length > 500) {
+          await out.writeAsBytes(bytes);
+          return true;
+        }
+      }
+    } catch (_) {}
+    // Attempt 3: draw the on-page <img> onto a canvas
+    try {
+      _imgWait = Completer<String>();
+      await wc.runJavaScript("""
+        try{
+          var im=document.querySelector('img.realtorCardImage');
+          var c=document.createElement('canvas');
+          c.width=im.naturalWidth;c.height=im.naturalHeight;
+          c.getContext('2d').drawImage(im,0,0);
+          ImgChannel.postMessage(c.toDataURL('image/jpeg',0.92));
+        }catch(e){ImgChannel.postMessage('ERR:'+e);}
+      """);
+      final data = await _imgWait!.future.timeout(const Duration(seconds: 10));
+      if (data.startsWith('data:')) {
+        final bytes = base64Decode(data.split(',').last);
+        if (bytes.length > 500) {
+          await File('${dir.path}/photo.jpg').writeAsBytes(bytes);
+          return true;
+        }
+      }
+    } catch (_) {}
+    return false;
   }
 
   Future<void> process() async {
@@ -211,9 +224,9 @@ class _HomeState extends State<Home> {
       d = await _extract() ?? d;
       final ok = (d?['name'] ?? '').toString().isNotEmpty;
       final full = ok &&
-          (d?['bio'] ?? '').toString().isNotEmpty &&
+          (d?['bio'] ?? '').toString().length > 5 &&
           (d?['photo'] ?? '').toString().isNotEmpty;
-      if (full || (ok && i >= 12)) break;
+      if (full || (ok && i >= 15)) break;
     }
     final name = (d?['name'] ?? '').toString();
     if (d == null || name.isEmpty) {
@@ -223,8 +236,6 @@ class _HomeState extends State<Home> {
       });
     }
     var info = (d['bio'] ?? '').toString();
-    final extra = (d['extra'] as List?)?.join('\n') ?? '';
-    if (extra.isNotEmpty) info = info.isEmpty ? extra : '$info\n\n$extra';
     final entry = {
       'id': id,
       'url': url,
