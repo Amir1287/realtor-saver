@@ -34,17 +34,25 @@ const _js = r'''
   var card=q('#realtorDetailsCard');
   if(blocked||!card){return JSON.stringify({blocked:blocked,hasCard:!!card,name:'',bio:'',photo:''});}
   var name=t('.realtorCardName h1',card);
-  var pos=t('.realtorCardTitle',card)||t('.realtorCardCorpName',card);
+  var pos=t('.realtorCardTitle',card);
   var addr=t('.realtorCardAddress',card);
-  if(!addr){
-    var tl=card.querySelector('a[href^="tel:"]');
-    if(tl){addr=tl.getAttribute('href').replace('tel:','').trim();}
-  }
+  var corp=t('.realtorCardCorpName',card);
+  var edu=t('.realtorCardEducation',card);
   var imgEl=q('img.realtorCardImage',card);
   var photo=imgEl?(imgEl.currentSrc||imgEl.src):'';
   var lines=[];
-  if(pos)lines.push(pos);
-  if(addr)lines.push(addr);
+  function add(v){v=(v||'').replace(/\s+/g,' ').trim();if(v&&lines.indexOf(v)<0)lines.push(v);}
+  add(pos);
+  add(addr);
+  add(corp);
+  add(edu);
+  [].forEach.call(card.querySelectorAll('.realtorCardFaxCon'),function(f){
+    var n=t('.realtorCardPhone',f);
+    if(n)add('Fax: '+n);
+  });
+  [].forEach.call(card.querySelectorAll('a[href^="tel:"]'),function(a){
+    add(a.getAttribute('href').replace('tel:',''));
+  });
   return JSON.stringify({blocked:false,hasCard:true,name:name,bio:lines.join('\n').trim(),photo:photo});
 })()
 ''';
