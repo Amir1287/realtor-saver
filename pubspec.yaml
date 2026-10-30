@@ -1,0 +1,20 @@
+name: realtor_saver
+description: Save realtor.ca agent info from shared links, detect duplicates, backup/restore.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  webview_flutter: ^4.9.0
+  path_provider: ^2.1.4
+  share_plus: ^10.0.0
+  file_picker: ^8.1.2
+  permission_handler: ^11.3.1
+  excel: 4.0.3
+
+flutter:
+  uses-material-design: true
