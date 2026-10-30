@@ -21,6 +21,8 @@ class App extends StatelessWidget {
       );
 }
 
+const _ua = 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
+
 // Extracts: name, biography, profile photo from the realtor page.
 const _js = r'''
 (function(){
@@ -94,7 +96,9 @@ class _HomeState extends State<Home> {
   @override
   void initState() {
     super.initState();
-    wc = WebViewController()..setJavaScriptMode(JavaScriptMode.unrestricted);
+    wc = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setUserAgent(_ua);
     _loadHistory();
     _loadSettings();
   }
@@ -149,7 +153,7 @@ class _HomeState extends State<Home> {
   }
 
   // Folder: <name>/ with "<name> text.txt" and photo
-  Future<void> _writeFiles(Map<String, dynamic> e) async {
+  Future<bool> _writeFiles(Map<String, dynamic> e) async {
     final basePath = savePath ??
         ((await getExternalStorageDirectory()) ??
                 await getApplicationDocumentsDirectory())
@@ -162,17 +166,25 @@ class _HomeState extends State<Home> {
     await File('${dir.path}/text.txt')
         .writeAsBytes([0xEF, 0xBB, 0xBF, ...utf8.encode(info.toString())]);
     final img = (e['photo'] ?? '').toString();
-    if (img.isNotEmpty) {
-      try {
-        final c = HttpClient();
-        final res = await (await c.getUrl(Uri.parse(img))).close();
-        final bytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
-        final m = RegExp(r'\.(png|webp|jpe?g)(\?|$)', caseSensitive: false)
-            .firstMatch(img);
-        final ext = (m?.group(1) ?? 'jpg').toLowerCase();
-        await File('${dir.path}/photo.$ext').writeAsBytes(bytes);
-        c.close();
-      } catch (_) {}
+    if (img.isEmpty) return false;
+    try {
+      final uri = Uri.parse((e['url'] ?? 'https://www.realtor.ca').toString()).resolve(img);
+      final c = HttpClient();
+      final req = await c.getUrl(uri);
+      req.headers.set('User-Agent', _ua);
+      req.headers.set('Referer', 'https://www.realtor.ca/');
+      req.headers.set('Accept', 'image/avif,image/webp,image/*,*/*;q=0.8');
+      final res = await req.close();
+      if (res.statusCode != 200) throw Exception('HTTP ${res.statusCode}');
+      final bytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
+      c.close();
+      if (bytes.length < 500) throw Exception('small');
+      final m = RegExp(r'\.(png|webp|jpe?g)(\?|$)', caseSensitive: false).firstMatch(uri.toString());
+      final ext = (m?.group(1) ?? 'jpg').toLowerCase();
+      await File('${dir.path}/photo.$ext').writeAsBytes(bytes);
+      return true;
+    } catch (_) {
+      return false;
     }
   }
 
@@ -193,6 +205,9 @@ class _HomeState extends State<Home> {
     Map<String, dynamic>? d;
     for (var i = 0; i < 25; i++) {
       await Future.delayed(const Duration(seconds: 1));
+      try {
+        await wc.runJavaScript('window.scrollTo(0, document.body.scrollHeight/2)');
+      } catch (_) {}
       d = await _extract() ?? d;
       final ok = (d?['name'] ?? '').toString().isNotEmpty;
       final full = ok &&
@@ -218,13 +233,13 @@ class _HomeState extends State<Home> {
       'photo': d['photo'] ?? '',
       'savedAt': DateTime.now().toIso8601String(),
     };
-    await _writeFiles(entry);
+    final photoOk = await _writeFiles(entry);
     history.insert(0, entry);
     await _saveHistory();
     ctrl.clear();
     setState(() {
       busy = false;
-      status = '✅ ذخیره شد: $name';
+      status = '✅ ذخیره شد: $name\n${info.isEmpty ? '⚠️ اطلاعات پیدا نشد\n' : ''}${photoOk ? '🖼 عکس ذخیره شد' : '⚠️ عکس دانلود نشد'}';
     });
   }
 
@@ -293,6 +308,41 @@ class _HomeState extends State<Home> {
     }
   }
 
+  Future<void> saveDebug() async {
+    final m = RegExp(r'https?://\S+').firstMatch(ctrl.text);
+    if (m == null) return setState(() => status = 'اول لینک رو بچسبون');
+    setState(() {
+      busy = true;
+      status = 'در حال گرفتن HTML صفحه (حدود ۲۰ ثانیه)...';
+    });
+    await wc.loadRequest(Uri.parse(m.group(0)!));
+    for (var i = 0; i < 20; i++) {
+      await Future.delayed(const Duration(seconds: 1));
+      try {
+        await wc.runJavaScript('window.scrollTo(0, document.body.scrollHeight/2)');
+      } catch (_) {}
+    }
+    try {
+      final r = await wc.runJavaScriptReturningResult('document.documentElement.outerHTML');
+      var h = r.toString();
+      if (h.startsWith('"')) h = jsonDecode(h) as String;
+      final ex = await _extract();
+      final d = await getTemporaryDirectory();
+      final f = File('${d.path}/debug_page.html');
+      await f.writeAsString('<!-- EXTRACTED: ${jsonEncode(ex)} -->\n$h');
+      setState(() {
+        busy = false;
+        status = 'فایل آماده شد';
+      });
+      await Share.shareXFiles([XFile(f.path)]);
+    } catch (_) {
+      setState(() {
+        busy = false;
+        status = 'خطا در گرفتن HTML';
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) => Scaffold(
         appBar: AppBar(title: const Text('ذخیره‌ی ریلتور'), actions: [
@@ -333,7 +383,8 @@ class _HomeState extends State<Home> {
             ),
             if (status.isNotEmpty)
               Padding(padding: const EdgeInsets.all(8), child: Text(status)),
-            SizedBox(width: 1, height: 1, child: WebViewWidget(controller: wc)),
+            SizedBox(height: busy ? 280 : 1, child: WebViewWidget(controller: wc)),
+            TextButton(onPressed: busy ? null : saveDebug, child: const Text('عیب‌یابی: ذخیره و ارسال HTML صفحه')),
             const Divider(),
             Text('تعداد ذخیره‌شده: ${history.length}'),
             Expanded(
