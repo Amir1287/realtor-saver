@@ -29,19 +29,26 @@ const _js = r'''
 (function(){
   function q(sel,root){return (root||document).querySelector(sel);}
   function t(sel,root){var e=q(sel,root);return e?(e.innerText||e.textContent||'').replace(/\s+/g,' ').trim():'';}
-  var card=q('#realtorDetailsCard')||document;
-  var name=t('.realtorCardName h1',card)||t('h1');
-  var edu=t('.realtorCardEducation',card);
-  var pos=t('.realtorCardTitle',card);
+  var bt=((document.title||'')+' '+(document.body?document.body.innerText:'')).toLowerCase().slice(0,3000);
+  var blocked=/security verification|v.rification de s.curit.|just a moment|verify you are human|checking your browser|performing security/.test(bt);
+  var card=q('#realtorDetailsCard');
+  if(blocked||!card){return JSON.stringify({blocked:blocked,hasCard:!!card,name:'',bio:'',photo:''});}
+  var name=t('.realtorCardName h1',card);
+  var pos=t('.realtorCardTitle',card)||t('.realtorCardCorpName',card);
   var addr=t('.realtorCardAddress',card);
+  if(!addr){
+    var tl=card.querySelector('a[href^="tel:"]');
+    if(tl){addr=tl.getAttribute('href').replace('tel:','').trim();}
+  }
   var imgEl=q('img.realtorCardImage',card);
   var photo=imgEl?(imgEl.currentSrc||imgEl.src):'';
   var lines=[];
   if(pos)lines.push(pos);
   if(addr)lines.push(addr);
-  return JSON.stringify({name:name,bio:lines.join('\n').trim(),photo:photo,extra:[]});
+  return JSON.stringify({blocked:false,hasCard:true,name:name,bio:lines.join('\n').trim(),photo:photo});
 })()
 ''';
+
 
 
 class Home extends StatefulWidget {
@@ -57,6 +64,7 @@ class _HomeState extends State<Home> {
   bool busy = false;
   String status = '';
   String? savePath;
+  bool verifying = false;
   Completer<String>? _imgWait;
 
   @override
@@ -216,18 +224,42 @@ class _HomeState extends State<Home> {
     });
     await wc.loadRequest(Uri.parse(url));
     Map<String, dynamic>? d;
-    for (var i = 0; i < 25; i++) {
+    var loadSecs = 0;
+    for (var i = 0; i < 240; i++) {
       await Future.delayed(const Duration(seconds: 1));
       try {
         await wc.runJavaScript('window.scrollTo(0, document.body.scrollHeight/2)');
       } catch (_) {}
-      d = await _extract() ?? d;
-      final ok = (d?['name'] ?? '').toString().isNotEmpty;
-      final full = ok &&
-          (d?['bio'] ?? '').toString().length > 5 &&
-          (d?['photo'] ?? '').toString().isNotEmpty;
-      if (full || (ok && i >= 15)) break;
+      final r = await _extract();
+      if (r == null) continue;
+      if (r['blocked'] == true) {
+        // Site shows "security verification": wait for the user to pass it
+        loadSecs = 0;
+        d = null;
+        if (!verifying) {
+          setState(() {
+            verifying = true;
+            status =
+                '⚠️ سایت تأیید امنیتی خواسته. تو کادر پایین تیک «من ربات نیستم» رو بزن، بعدش خودکار ادامه میده.';
+          });
+        }
+        continue;
+      }
+      if (verifying) {
+        setState(() {
+          verifying = false;
+          status = 'در حال خواندن اطلاعات...';
+        });
+      }
+      d = r;
+      loadSecs++;
+      final hasName = (r['name'] ?? '').toString().isNotEmpty;
+      final hasPhoto = (r['photo'] ?? '').toString().isNotEmpty;
+      final hasInfo = (r['bio'] ?? '').toString().isNotEmpty;
+      if (hasName && hasPhoto && ((hasInfo && loadSecs >= 3) || loadSecs >= 8)) break;
+      if (loadSecs >= 25) break;
     }
+    verifying = false;
     final name = (d?['name'] ?? '').toString();
     if (d == null || name.isEmpty) {
       return setState(() {
@@ -394,7 +426,7 @@ class _HomeState extends State<Home> {
             ),
             if (status.isNotEmpty)
               Padding(padding: const EdgeInsets.all(8), child: Text(status)),
-            SizedBox(height: busy ? 280 : 1, child: WebViewWidget(controller: wc)),
+            SizedBox(height: busy ? (verifying ? 400 : 260) : 1, child: WebViewWidget(controller: wc)),
             TextButton(onPressed: busy ? null : saveDebug, child: const Text('عیب‌یابی: ذخیره و ارسال HTML صفحه')),
             const Divider(),
             Text('تعداد ذخیره‌شده: ${history.length}'),
